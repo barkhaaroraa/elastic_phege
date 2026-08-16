@@ -41,7 +41,10 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     client = _client()
     mappings.create_indices(client, recreate=args.recreate)
 
-    interactions, stats = gaborieau.read_interactions()
+    bacteria = gaborieau.read_bacteria()
+    interactions, stats = gaborieau.read_interactions(
+        hosts={doc["strain_id"]: doc for doc in bacteria}
+    )
     print(
         f"\ninteraction matrix: {stats.strains} strains x {stats.phages} phages "
         f"= {stats.cells:,} cells"
@@ -53,7 +56,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     )
     print(f"  threshold: score > {gaborieau.INFECT_THRESHOLD}")
 
-    bacteria = gaborieau.read_bacteria()
     phages = gaborieau.read_phages(interactions)
 
     plan = [

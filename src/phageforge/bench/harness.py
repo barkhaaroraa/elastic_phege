@@ -38,9 +38,10 @@ from pathlib import Path
 from elasticsearch import Elasticsearch
 
 from phageforge import config
+from phageforge.bench import significance
 from phageforge.funnel import cocktail as cocktail_mod
 from phageforge.funnel.pipeline import run_funnel
-from phageforge.funnel.stages import EmptyStage, _distance_from_score
+from phageforge.funnel.stages import EmptyStage, _distance_from_score, susceptibility_profiles
 
 TOP_K = 10
 COCKTAIL_SIZE = 4
@@ -172,12 +173,18 @@ class MethodScores:
     topk_hits: list[float] = field(default_factory=list)
     failures: list[tuple[str, str]] = field(default_factory=list)
     ms: list[float] = field(default_factory=list)
+    #: Which strain produced each score, positionally aligned with the lists
+    #: above. Without it the per-method lists cannot be paired: a method that
+    #: fails on a strain skips its ``add``, so index *i* is not the same strain
+    #: across methods and any paired test would silently compare the wrong rows.
+    strains: list[str] = field(default_factory=list)
 
     def add(self, ranking: Sequence[str], truth: Truth, cocktail: Sequence[str] = ()) -> None:
         # Only score phages actually measured against this strain -- an untested
         # pair is not a negative, and counting it as one fabricates the metric.
         measured = [p for p in ranking if p in truth.outcomes]
         positives = truth.positives
+        self.strains.append(truth.strain_id)
         self.p_at_k.append(precision_at_k(measured, positives))
         self.r_at_k.append(recall_at_k(measured, positives))
         self.auprc.append(average_precision(measured, positives))
@@ -210,6 +217,16 @@ class MethodScores:
             ),
             "n_failed": len(self.failures),
         }
+
+    def per_strain(self, metric: str = "p_at_10") -> dict[str, float]:
+        """``{strain_id: score}`` for one metric, for paired testing.
+
+        The means in :meth:`summary` cannot answer "is this gap real?" -- see
+        :mod:`phageforge.bench.significance`. These are the raw paired
+        observations that can, and they are cheap to keep: 390 floats per method.
+        """
+        values = {"p_at_10": self.p_at_k, "r_at_10": self.r_at_k, "auprc": self.auprc}[metric]
+        return dict(zip(self.strains, values, strict=True))
 
 
 # --------------------------------------------------------------------- baselines
@@ -307,10 +324,32 @@ def baseline_phylo_nn(
 #: full funnel with one signal switched off, which is the only way an ablation
 #: answers "which part carries the signal" rather than "what does a different
 #: program do".
+#: Weights for the receptor/defence features when they are switched on.
+#:
+#: Set by *variance matching*, not by sweeping the benchmark. Measured across 12
+#: strains, the per-candidate spread of each feature is: prior 0.181,
+#: receptor_compat 0.046, defence_compat 0.019. At the shipped weights the prior
+#: contributes a score spread of 0.181 x 3.0 = 0.543, so a weight of 3.0 on
+#: receptor and 7.0 on defence gives each of them ~25% of the prior's influence.
+#:
+#: That 25% is the actual design decision, and it is an a priori statement about
+#: how much to trust receptor compatibility relative to measured neighbours --
+#: not a number read off the metric we then report. Picking the weight by
+#: maximising P@10 on these same folds would be fitting on the test set. Fitting
+#: it honestly is the LTR trainer's job (WS-4); 3.4 reports the sensitivity.
+RECEPTOR_WEIGHTS = {"receptor_compat": 3.0, "defence_compat": 7.0}
+
 FUNNEL_CONFIGS = {
     "funnel": {},
     "funnel_minus_rbp": {"use_rbp": False},
     "funnel_minus_prior": {"use_prior": False},
+    # REVIEW_BACKLOG.md 3.1. Receptor compatibility now ships on, so its ablation
+    # is subtractive like the others: this row is the funnel as it stood before
+    # the reviewer finding was acted on.
+    "funnel_minus_receptor": {"weights": {"receptor_compat": 0.0}},
+    # 3.2. Defence ships *off* -- this row is what turning it on would buy, kept
+    # in the table so a null result that cost real work stays visible.
+    "funnel_plus_defence": {"weights": {"defence_compat": RECEPTOR_WEIGHTS["defence_compat"]}},
 }
 
 
@@ -351,6 +390,10 @@ def run_benchmark(
         held_out = set(fold)
         training = [s for s in strains if s not in held_out]
         breadth = fold_breadth(client, training, phages)
+        # Same fold-safety contract as breadth, and the same reason to compute it
+        # once per fold rather than once per strain: it depends only on which
+        # strains are visible, not on which one is being scored.
+        profiles = susceptibility_profiles(client, training=training)
 
         for strain_id in fold:
             record = truth[strain_id]
@@ -385,6 +428,7 @@ def run_benchmark(
                         neighbour_k=neighbour_k,
                         exclude_strains=tuple(excluded),
                         breadth=breadth,
+                        profiles=profiles,
                         explain=False,
                         build_cocktail=False,
                         persist=False,
@@ -427,6 +471,22 @@ def run_benchmark(
             summary["p_at_10"] / base_rate if base_rate else float("nan")
         )
 
+    # Paired per-strain scores, and the significance of each gap. A mean alone
+    # cannot say whether a difference is real, and this benchmark has already been
+    # read wrongly for want of one: "- RBP arm" was retired on a 0.0002 gap that
+    # was never shown to differ from zero. Two references, because two different
+    # questions get asked of this table -- "do we beat the best baseline?" and
+    # "does this stage carry signal?".
+    per_strain = {
+        metric: {name: score.per_strain(metric) for name, score in scores.items()}
+        for metric in ("p_at_10", "auprc")
+    }
+    comparisons = [
+        significance.compare_all(per_strain["p_at_10"], reference=reference).to_dict()
+        for reference in ("phylo_nn", "funnel")
+        if reference in scores
+    ]
+
     return {
         "n_strains_evaluated": len(scores[next(iter(scores))].p_at_k) if scores else 0,
         "n_strains_available": len(strains),
@@ -437,6 +497,8 @@ def run_benchmark(
         "base_rate": base_rate,
         "seed": SEED,
         "results": summaries,
+        "significance": comparisons,
+        "per_strain": per_strain,
         "failures": {
             name: score.failures[:10] for name, score in scores.items() if score.failures
         },
@@ -474,6 +536,8 @@ _ROW_ORDER = [
     ("funnel", "PhageForge funnel"),
     ("funnel_minus_rbp", "  - RBP arm (ablation)"),
     ("funnel_minus_prior", "  - neighbour prior (ablation)"),
+    ("funnel_minus_receptor", "  - receptor compat (ablation)"),
+    ("funnel_plus_defence", "  + defence compat (measured null)"),
 ]
 
 
@@ -520,6 +584,19 @@ def format_table(results: dict) -> str:
             f"cocktail (4 phages, receptor-diverse) covers "
             f"{funnel['cocktail_coverage']:.1%} of held-out strains vs "
             f"{funnel['top4_coverage']:.1%} for the top 4 ranked individually"
+        )
+    for report in results.get("significance", []):
+        lines.append("")
+        lines.append(
+            significance.format_report(
+                significance.Report(
+                    reference=report["reference"],
+                    metric=report["metric"],
+                    comparisons=[significance.Comparison(**{
+                        k: v for k, v in c.items() if k not in ("significant", "verdict")
+                    }) for c in report["comparisons"]],
+                )
+            )
         )
     for name, failures in results.get("failures", {}).items():
         lines.append(f"\n{name}: {len(failures)} strain(s) failed, e.g. {failures[0]}")

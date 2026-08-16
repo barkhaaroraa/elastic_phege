@@ -19,11 +19,14 @@ from __future__ import annotations
 import json
 import math
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from elasticsearch import Elasticsearch
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 from phageforge import config
 from phageforge.api import models
@@ -436,19 +439,48 @@ def get_run(run_id: str, client: Elasticsearch = Depends(get_es)) -> dict:
 
 
 @app.get("/benchmark", tags=["audit"])
-def benchmark() -> dict:
-    """The most recent benchmark results, as written by ``make bench``.
+def benchmark(
+    threshold: int = Query(
+        default=0,
+        ge=0,
+        le=3,
+        description="which infection-threshold run to serve. The code binarises at "
+        "`score > threshold`, so 0 = any lysis, 1 = the '>=2' cut, 2 = the '>=3' cut.",
+    ),
+) -> dict:
+    """A measured benchmark run, as written by ``make bench``.
 
     Served from disk rather than recomputed: the benchmark takes ~70 s and its
     whole point is that the number you are shown is the number that was measured.
+
+    Each threshold is a *separate artefact* because changing it requires a full
+    re-derivation (``ingest -> features -> proteins -> bench``) — ``infects`` is
+    computed at ingest, so the runs cannot be produced by re-reading one file.
     """
-    path = config.DERIVED_DIR / "benchmark.json"
+    name = "benchmark.json" if threshold == 0 else f"benchmark-gt{threshold}.json"
+    path = config.DERIVED_DIR / name
     if not path.exists():
         raise HTTPException(
             status_code=404,
-            detail="no benchmark.json yet — run `make bench`",
+            detail=(
+                f"no {name} yet — run `PF_INFECT_THRESHOLD={threshold} make ingest features "
+                f"proteins bench` (see current_status.md §3.1)"
+                if threshold
+                else "no benchmark.json yet — run `make bench`"
+            ),
         )
     # parse_constant catches the bare NaN that older runs wrote before the
     # harness switched to emitting null.
     results = json.loads(path.read_text(), parse_constant=lambda _: None)
     return {"generated_from": str(path), **_jsonable(results)}
+
+
+@app.get("/", include_in_schema=False)
+def ui() -> FileResponse:
+    """The demo UI: pick a strain, run the funnel, see the ranking and the benchmark.
+
+    A single self-contained file served same-origin, so it talks to the endpoints
+    above with no CORS and no build step. It is a thin view over the API — every
+    number it shows comes from a documented endpoint, nothing is computed here.
+    """
+    return FileResponse(STATIC_DIR / "index.html")

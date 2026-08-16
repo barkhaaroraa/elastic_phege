@@ -87,8 +87,28 @@ class MatrixStats:
     score_counts: dict[str, int]
 
 
-def read_interactions() -> tuple[list[dict], MatrixStats]:
-    """Parse the interaction matrix into flat interaction documents."""
+#: Host attributes copied from ``pf-bacteria`` onto every interaction row, as
+#: ``bacteria field -> interaction field``. See the mapping comment in
+#: ``es/mappings.py`` for why the denormalisation is worth its cost.
+DENORMALISED_HOST_FIELDS = {
+    "lps_type": "host_lps_type",
+    "o_antigen": "host_o_antigen",
+    "capsule_types": "host_capsule_types",
+    "defence_systems": "host_defence_systems",
+}
+
+
+def read_interactions(hosts: dict[str, dict] | None = None) -> tuple[list[dict], MatrixStats]:
+    """Parse the interaction matrix into flat interaction documents.
+
+    ``hosts`` maps ``strain_id -> bacteria document`` and supplies the
+    denormalised receptor/defence fields. It is read from :func:`read_bacteria`
+    when not given; callers that already hold the bacteria records should pass
+    them rather than paying for a second parse.
+    """
+    if hosts is None:
+        hosts = {doc["strain_id"]: doc for doc in read_bacteria()}
+
     with MATRIX_CSV.open(newline="", encoding="utf-8-sig") as fh:
         rows = [line.rstrip("\n") for line in fh if line.strip()]
 
@@ -112,12 +132,23 @@ def read_interactions() -> tuple[list[dict], MatrixStats]:
                 untested += 1
                 continue
             score = float(raw)
+            host = hosts.get(strain_id, {})
+            denormalised = {
+                target: host[source]
+                for source, target in DENORMALISED_HOST_FIELDS.items()
+                # A missing or null attribute is left off the document entirely
+                # rather than written as null: Stage D reads these through terms
+                # aggregations, where an absent field is correctly invisible and
+                # an explicit null would still need special-casing.
+                if host.get(source)
+            }
             docs.append(
                 {
                     "phage_id": phage_id,
                     "host_id": strain_id,
                     "host_species": "Escherichia coli",
                     "infects": score > INFECT_THRESHOLD,
+                    **denormalised,
                     "score_raw": score,
                     "assay_type": "spot_lysis_graded",
                     "resolution": "strain",

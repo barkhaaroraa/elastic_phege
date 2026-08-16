@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhageForge</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#129440;</text></svg>">
+<style>
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --series-1: #2a78d6;
+  --recede: #898781;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --critical: #d03b3b;
+  --warning: #fab219;
+  /* ordinal ramp for funnel stages — validated light, --ordinal */
+  --stage-1: #86b6ef;
+  --stage-2: #5598e7;
+  --stage-3: #2a78d6;
+  --stage-4: #1c5cab;
+  --stage-5: #104281;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-1: #3987e5;
+    --recede: #898781;
+    --good: #0ca30c;
+    --good-text: #0ca30c;
+    --critical: #d03b3b;
+    --warning: #fab219;
+    --stage-1: #cde2fb;
+    --stage-2: #9ec5f4;
+    --stage-3: #6da7ec;
+    --stage-4: #3987e5;
+    --stage-5: #184f95;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--text-primary);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; }
+
+header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 4px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--text-secondary); font-size: 13px; }
+.health { margin-left: auto; font-size: 12px; color: var(--text-secondary);
+  display: flex; align-items: center; gap: 7px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--good); }
+.dot.bad { background: var(--critical); }
+
+.card {
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: 10px; padding: 18px 20px; margin-top: 18px;
+}
+.card h2 {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em;
+  color: var(--text-secondary); margin: 0 0 14px; font-weight: 600;
+}
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* ---- strain picker ---- */
+.picker { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+input[type=search] {
+  flex: 1 1 260px; min-width: 200px; padding: 9px 12px; font: inherit;
+  background: var(--plane); color: var(--text-primary);
+  border: 1px solid var(--axis); border-radius: 7px;
+}
+input[type=search]:focus { outline: 2px solid var(--series-1); outline-offset: -1px; }
+button {
+  font: inherit; font-weight: 500; padding: 9px 16px; border-radius: 7px; cursor: pointer;
+  background: var(--series-1); color: #fff; border: 1px solid transparent;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.ghost { background: transparent; color: var(--text-primary); border-color: var(--axis); }
+.quick { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.quick button { padding: 4px 10px; font-size: 13px; }
+.results { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.results button { padding: 4px 10px; font-size: 13px; font-family: ui-monospace, monospace; }
+
+/* ---- strain profile ---- */
+.facts { display: flex; flex-wrap: wrap; gap: 8px 22px; }
+.fact { font-size: 13px; }
+.fact b { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--muted); font-weight: 600; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---- stage strip ---- */
+.stages { display: flex; gap: 2px; height: 26px; border-radius: 4px; overflow: hidden; }
+.stages > div { position: relative; min-width: 2px; }
+.stagelegend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; font-size: 12px;
+  color: var(--text-secondary); }
+.stagelegend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+/* ---- shortlist ---- */
+.row {
+  display: grid; grid-template-columns: 30px 1fr 170px; gap: 14px;
+  padding: 13px 0; border-top: 1px solid var(--grid); align-items: start;
+}
+.row:first-of-type { border-top: none; }
+.rank { font-size: 17px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.pid { font-weight: 600; font-family: ui-monospace, monospace; }
+.meta { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.reasons { margin: 7px 0 0; padding: 0; list-style: none; }
+.reasons li { font-size: 12.5px; color: var(--text-secondary); padding-left: 18px;
+  position: relative; margin-top: 3px; }
+.reasons li::before { content: "—"; position: absolute; left: 0; color: var(--muted); }
+.badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border);
+  color: var(--text-secondary); white-space: nowrap;
+}
+.badge.t1 { color: var(--good-text); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.scorewrap { text-align: right; }
+.scorebar { height: 7px; background: var(--grid); border-radius: 4px; overflow: hidden; margin-top: 5px; }
+.scorebar > i { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
+.num { font-variant-numeric: tabular-nums; font-size: 13px; }
+
+/* ---- benchmark chart ---- */
+.bar { display: grid; grid-template-columns: 158px 1fr 54px; gap: 10px;
+  align-items: center; margin-bottom: 7px; font-size: 13px; }
+.bartrack { position: relative; height: 20px; }
+.barfill { height: 100%; border-radius: 0 4px 4px 0; background: var(--recede); }
+.barfill.hi { background: var(--series-1); }
+.baseline { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--axis); }
+.barlabel { color: var(--text-secondary); }
+.barlabel.hi { color: var(--text-primary); font-weight: 600; }
+.barval { text-align: right; font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary);
+  margin: 12px 0 0; flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.tabs button { padding: 4px 11px; font-size: 12.5px; background: transparent;
+  color: var(--text-secondary); border: 1px solid var(--axis); }
+.tabs button[aria-pressed=true] { background: var(--series-1); color: #fff; border-color: transparent; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 6px; }
+th, td { text-align: right; padding: 5px 8px; border-top: 1px solid var(--grid);
+  font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+th { color: var(--muted); font-weight: 600; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.04em; border-top: none; }
+details { margin-top: 12px; } summary { cursor: pointer; font-size: 12px; color: var(--text-secondary); }
+
+.note { font-size: 12.5px; color: var(--text-secondary); margin: 12px 0 0; }
+.stopped { border-left: 3px solid var(--warning); padding: 12px 14px; background: var(--plane);
+  border-radius: 0 7px 7px 0; }
+.stopped b { display: block; margin-bottom: 3px; }
+.err { color: var(--critical); }
+.empty { color: var(--muted); font-size: 13px; }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--grid);
+  border-top-color: var(--series-1); border-radius: 50%; animation: s 0.7s linear infinite;
+  vertical-align: -2px; }
+@keyframes s { to { transform: rotate(360deg); } }
+#tip {
+  position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--text-primary); color: var(--surface-1); font-size: 12px;
+  padding: 5px 9px; border-radius: 6px; z-index: 10; white-space: nowrap;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>PhageForge</h1>
+  <span class="sub">phage&ndash;host prediction over Elasticsearch</span>
+  <span class="health"><span class="dot" id="hdot"></span><span id="htext">checking…</span></span>
+</header>
+
+<div class="card">
+  <h2>1 &middot; Pick a strain</h2>
+  <div class="picker">
+    <input type="search" id="q" placeholder="Search strain id, e.g. ECOR-54" autocomplete="off">
+    <button id="run" disabled>Predict</button>
+  </div>
+  <div class="quick" id="quick"></div>
+  <div class="results" id="hits"></div>
+  <div id="profile" style="margin-top:16px"></div>
+</div>
+
+<div id="out"></div>
+
+<div class="card">
+  <h2>How good is it? &mdash; strain-grouped 5-fold benchmark</h2>
+  <div class="tabs" id="thr"></div>
+  <div id="bench"><span class="empty">loading…</span></div>
+</div>
+
+<p class="note" style="text-align:center">
+  Scores are uncalibrated ranking scores, not probabilities.
+</p>
+
+</div>
+<div id="tip"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let current = null;
+
+/* ---------- tooltip ---------- */
+const tip = $("#tip");
+function bindTip(el, text) {
+  el.addEventListener("mousemove", e => {
+    tip.textContent = text;
+    tip.style.opacity = 1;
+    const w = tip.offsetWidth;
+    tip.style.left = Math.min(e.clientX + 12, innerWidth - w - 8) + "px";
+    tip.style.top = (e.clientY - 30) + "px";
+  });
+  el.addEventListener("mouseleave", () => tip.style.opacity = 0);
+}
+
+/* ---------- health ---------- */
+async function health() {
+  try {
+    const h = await (await fetch("/health")).json();
+    $("#hdot").className = "dot " + (h.ready ? "ok" : "bad");
+    $("#htext").textContent = h.ready
+      ? `${h.cluster_status} · ${h.indices["pf-phages"].docs} phages · ${h.indices["pf-bacteria"].docs} strains · ${h.model_version}`
+      : "not ready — " + (h.notes[0] || "run make ingest");
+  } catch {
+    $("#hdot").className = "dot bad";
+    $("#htext").textContent = "API unreachable";
+  }
+}
+
+/* ---------- strain search ---------- */
+let timer;
+$("#q").addEventListener("input", e => {
+  clearTimeout(timer);
+  timer = setTimeout(() => search(e.target.value.trim()), 180);
+});
+async function search(q) {
+  if (!q) { $("#hits").innerHTML = ""; return; }
+  const r = await fetch("/strains?limit=12&q=" + encodeURIComponent(q));
+  const list = await r.json();
+  $("#hits").innerHTML = list.length
+    ? list.map(s => `<button class="ghost" data-s="${esc(s.strain_id)}">${esc(s.strain_id)}</button>`).join("")
+    : `<span class="empty">no strain matches “${esc(q)}”</span>`;
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-s]");
+  if (b) select(b.dataset.s);
+});
+
+async function select(id) {
+  const r = await fetch("/strains/" + encodeURIComponent(id));
+  if (!r.ok) { $("#profile").innerHTML = `<span class="err">${esc((await r.json()).detail)}</span>`; return; }
+  const s = await r.json();
+  current = s.strain_id;
+  $("#q").value = s.strain_id;
+  $("#hits").innerHTML = "";
+  $("#run").disabled = false;
+  // replaceState, not location.hash: keeps the URL shareable without re-firing
+  // hashchange and running the funnel twice.
+  history.replaceState(null, "", "#" + encodeURIComponent(s.strain_id));
+  const f = (k, v) => v == null || v === "" ? "" : `<div class="fact"><b>${k}</b>${esc(v)}</div>`;
+  $("#profile").innerHTML = `<div class="facts">
+    ${f("strain", s.strain_id)}${f("ST", s.st)}${f("phylogroup", s.phylogroup)}
+    ${f("O-antigen", s.o_antigen)}${f("H-type", s.h_type)}${f("LPS core", s.lps_type)}
+    ${f("pathotype", s.pathotype)}${f("defence systems", (s.defence_systems || []).length || null)}
+    ${f("measured infections", s.n_infections)}
+  </div>${s.has_genome_vector ? "" :
+    `<p class="note err">This strain has no genome vector — the funnel will stop at stage N.</p>`}`;
+}
+
+/* ---------- predict ---------- */
+$("#run").addEventListener("click", predict);
+async function predict() {
+  if (!current) return;
+  $("#run").disabled = true;
+  $("#out").innerHTML = `<div class="card"><span class="spin"></span> running the funnel…</div>`;
+  const r = await fetch(`/predict/${encodeURIComponent(current)}?top_n=10`);
+  const d = await r.json();
+  $("#run").disabled = false;
+
+  if (r.status === 422) {
+    $("#out").innerHTML = `<div class="card"><h2>2 · Result</h2>
+      <div class="stopped"><b>Funnel stopped at stage ${esc(d.failed_stage)}</b>
+      ${esc(d.failure_reason)}<br><span class="note">
+      No shortlist is returned rather than an unexplained empty one. Run <span class="mono">${esc(d.run_id)}</span>.
+      </span></div></div>`;
+    return;
+  }
+  if (!r.ok) {
+    $("#out").innerHTML = `<div class="card"><p class="err">${esc(d.detail || "request failed")}</p></div>`;
+    return;
+  }
+  render(d);
+}
+
+const STAGE_NAMES = { N: "neighbours", B: "prior", A: "candidates", D: "ranking", C: "explanation" };
+const ORDER = ["N", "B", "A", "D", "C"];
+
+function render(d) {
+  const max = Math.max(...d.shortlist.map(e => e.score), 1);
+
+  /* stage strip — ordinal ramp, 2px gaps, ordered by execution */
+  const stages = ORDER.filter(k => d.stages[k]);
+  const total = stages.reduce((a, k) => a + d.stages[k].ms, 0) || 1;
+  const strip = stages.map((k, i) =>
+    `<div data-ms="${d.stages[k].ms}" data-k="${k}" style="flex:${d.stages[k].ms};background:var(--stage-${i + 1})"></div>`
+  ).join("");
+  const legend = stages.map((k, i) =>
+    `<span><i class="swatch" style="background:var(--stage-${i + 1})"></i>
+     ${k} ${STAGE_NAMES[k]} <span class="num">${d.stages[k].ms.toFixed(0)} ms</span></span>`
+  ).join("");
+
+  const rows = d.shortlist.map(e => {
+    const t = e.taxonomy || {};
+    const tier = e.evidence_tier === 1
+      ? `<span class="badge t1">✓ tier 1 · measured</span>`
+      : `<span class="badge">~ tier 4 · inferred</span>`;
+    return `<div class="row">
+      <div class="rank">${e.rank}</div>
+      <div>
+        <span class="pid">${esc(e.phage_id)}</span> ${tier}
+        <div class="meta">${esc(t.genus || "unclassified")}${e.rbp_confidence ? " · RBP " + esc(e.rbp_confidence) : ""}
+          ${e.n_neighbours_tested ? ` · ${e.n_neighbours_infected}/${e.n_neighbours_tested} similar strains infected` : ""}</div>
+        <ul class="reasons">${(e.reasons || []).slice(0, 2).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+      </div>
+      <div class="scorewrap">
+        <span class="num">${e.score.toFixed(2)}</span>
+        <div class="scorebar"><i style="width:${(e.score / max * 100).toFixed(1)}%"></i></div>
+        <span class="meta">prior ${e.prior.toFixed(2)}</span>
+      </div>
+    </div>`;
+  }).join("");
+
+  const cocktail = d.cocktail.length ? `<div class="card"><h2>Cocktail — greedy set-cover on receptor diversity</h2>
+    ${d.cocktail.map((c, i) => `<div class="row" style="grid-template-columns:30px 1fr 110px">
+      <div class="rank">${i + 1}</div>
+      <div><span class="pid">${esc(c.phage_id)}</span>
+        <div class="meta">${esc(c.rationale)}</div></div>
+      <div class="scorewrap"><span class="num">${c.marginal_gain.toFixed(2)}</span>
+        <span class="meta" style="display:block">marginal gain</span></div>
+    </div>`).join("")}
+    <p class="note">Overlap measured by ESM-2 RBP cosine. Phages without an RBP embedding are
+    marked “unverified” rather than assumed distinct.</p></div>` : "";
+
+  $("#out").innerHTML = `
+    <div class="card">
+      <h2>2 · Funnel — ${d.total_ms.toFixed(0)} ms end to end</h2>
+      <div class="stages" id="strip">${strip}</div>
+      <div class="stagelegend">${legend}</div>
+      <p class="note">Every stage runs inside Elasticsearch: kNN → weighted terms agg →
+      RRF → <span class="mono">script_score</span> → <span class="mono">significant_terms</span>.
+      Run <span class="mono">${esc(d.run_id)}</span>, persisted to <span class="mono">pf-predictions</span>.</p>
+    </div>
+    <div class="card"><h2>3 · Ranked shortlist for ${esc(d.strain_id)}</h2>${rows}
+      <p class="note">Tier 1 = measured strain-level interactions among genomic neighbours.
+      Tier 4 = vector similarity alone. Every row states its basis.</p>
+    </div>${cocktail}`;
+
+  document.querySelectorAll("#strip > div").forEach(el =>
+    bindTip(el, `${el.dataset.k} ${STAGE_NAMES[el.dataset.k]} — ${(+el.dataset.ms).toFixed(1)} ms (${(el.dataset.ms / total * 100).toFixed(0)}%)`));
+}
+
+/* ---------- benchmark ---------- */
+const CUTS = [
+  { q: "", label: "score > 0", note: "any lysis (default)" },
+  { q: "?threshold=1", label: "≥ 2", note: "moderate lysis" },
+  { q: "?threshold=2", label: "≥ 3", note: "strong lysis" },
+];
+const LABELS = {
+  random: "Random", generalist: "Most-generalist", phylo_nn: "Phylogenetic NN",
+  funnel: "PhageForge funnel", funnel_minus_rbp: "  − RBP arm (ablation)",
+  funnel_minus_prior: "  − prior (ablation)",
+};
+
+$("#thr").innerHTML = CUTS.map((c, i) =>
+  `<button data-cut="${i}" aria-pressed="${i === 0}">${c.label}</button>`).join("");
+$("#thr").addEventListener("click", e => {
+  const b = e.target.closest("[data-cut]"); if (!b) return;
+  [...$("#thr").children].forEach(x => x.setAttribute("aria-pressed", x === b));
+  bench(+b.dataset.cut);
+});
+
+async function bench(i = 0) {
+  const cut = CUTS[i];
+  $("#bench").innerHTML = `<span class="spin"></span>`;
+  const r = await fetch("/benchmark" + cut.q);
+  if (!r.ok) { $("#bench").innerHTML = `<span class="empty">no benchmark for this cut — run <span class="mono">make bench</span></span>`; return; }
+  const d = await r.json();
+  const rows = d.results.filter(x => LABELS[x.method]);
+  const max = Math.max(...rows.map(x => x.p_at_10));
+  const scale = v => (v / (max * 1.12) * 100).toFixed(1);
+
+  const bars = rows.map(x => {
+    const hi = x.method === "funnel";
+    return `<div class="bar">
+      <span class="barlabel ${hi ? "hi" : ""}">${esc(LABELS[x.method])}</span>
+      <div class="bartrack">
+        <div class="barfill ${hi ? "hi" : ""}" style="width:${scale(x.p_at_10)}%"
+             data-t="${esc(LABELS[x.method].trim())} — P@10 ${x.p_at_10.toFixed(3)}, ${(x.p_at_10 / d.base_rate).toFixed(2)}× base rate"></div>
+        <div class="baseline" style="left:${scale(d.base_rate)}%"
+             data-t="base rate ${(d.base_rate * 100).toFixed(1)}% — random guessing"></div>
+      </div>
+      <span class="barval ${hi ? "hi" : ""}">${x.p_at_10.toFixed(3)}</span>
+    </div>`;
+  }).join("");
+
+  const f = rows.find(x => x.method === "funnel");
+  const best = Math.max(...rows.filter(x => ["generalist", "phylo_nn"].includes(x.method)).map(x => x.p_at_10));
+
+  $("#bench").innerHTML = `${bars}
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--series-1)"></i>PhageForge funnel</span>
+      <span><i class="swatch" style="background:var(--recede)"></i>baselines &amp; ablations</span>
+      <span><i class="swatch" style="width:2px;height:12px;border-radius:0;background:var(--axis)"></i>base rate (${(d.base_rate * 100).toFixed(1)}%)</span>
+    </div>
+    <p class="note"><b>P@10 ${f.p_at_10.toFixed(3)}</b> — ${(f.p_at_10 / d.base_rate).toFixed(2)}× the base rate,
+    and +${((f.p_at_10 - best) * 100).toFixed(1)} points over the best baseline.
+    ${d.n_strains_evaluated} strains × ${d.n_phages} phages, ${d.n_folds}-fold strain-grouped CV
+    (${cut.note}). Cocktail of 4 covers ${(f.cocktail_coverage * 100).toFixed(0)}% of held-out strains.</p>
+    <details><summary>Table view — all metrics</summary>
+      <table><thead><tr><th>Method</th><th>P@10</th><th>R@10</th><th>AUPRC</th><th>× base</th><th>p95 ms</th></tr></thead>
+      <tbody>${rows.map(x => `<tr><td>${esc(LABELS[x.method].trim())}</td>
+        <td>${x.p_at_10.toFixed(3)}</td><td>${x.r_at_10.toFixed(3)}</td><td>${x.auprc.toFixed(3)}</td>
+        <td>${(x.p_at_10 / d.base_rate).toFixed(2)}</td>
+        <td>${x.p95_ms == null ? "—" : x.p95_ms.toFixed(0)}</td></tr>`).join("")}</tbody></table>
+    </details>`;
+
+  document.querySelectorAll("#bench [data-t]").forEach(el => bindTip(el, el.dataset.t));
+}
+
+/* ---------- boot ---------- */
+/* `/#ECOR-54` selects and runs that strain immediately, so a demo link is
+   shareable and lands on a result rather than an empty form. */
+async function fromHash() {
+  const id = decodeURIComponent(location.hash.slice(1)).trim();
+  if (!id) return;
+  await select(id);
+  if (current) await predict();
+}
+addEventListener("hashchange", fromHash);
+
+(async () => {
+  health();
+  bench(0);
+  const seed = await (await fetch("/strains?limit=6")).json();
+  $("#quick").innerHTML = `<span class="empty" style="align-self:center">try:</span>` +
+    ["ECOR-54", ...seed.map(s => s.strain_id)].filter((v, i, a) => a.indexOf(v) === i).slice(0, 6)
+      .map(s => `<button class="ghost" data-s="${esc(s)}">${esc(s)}</button>`).join("");
+  fromHash();
+})();
+</script>
+</body>
+</html>

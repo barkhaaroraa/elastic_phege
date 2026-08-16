@@ -164,6 +164,18 @@ MAPPINGS: dict[str, dict] = {
                 "host_id": {"type": "keyword"},
                 "host_species": {"type": "keyword"},
                 "infects": {"type": "boolean"},
+                # Host receptor and defence attributes, denormalised from
+                # pf-bacteria at ingest. Elasticsearch has no join, and Stage D
+                # needs "how often does this phage infect strains that look like
+                # *this* one at the receptor level" -- which is one terms
+                # aggregation once the attribute sits on the interaction row, and
+                # 403 extra lookups per phage if it does not. The bacteria doc
+                # stays the source of truth; these are a read-optimised copy and
+                # are rewritten wholesale on every idempotent re-ingest.
+                "host_lps_type": {"type": "keyword"},
+                "host_o_antigen": {"type": "keyword"},
+                "host_capsule_types": {"type": "keyword"},
+                "host_defence_systems": {"type": "keyword"},
                 "eop": {"type": "float"},
                 "score_raw": {"type": "float"},
                 "assay_type": {"type": "keyword"},

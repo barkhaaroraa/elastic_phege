@@ -189,3 +189,43 @@ def test_benchmark_endpoint_is_strict_json(client):
     body = response.json()  # httpx parses strictly; a bare NaN would raise here
     assert body["results"]
     assert {"random", "funnel"} <= {r["method"] for r in body["results"]}
+
+
+def test_benchmark_threshold_serves_distinct_runs(client):
+    """Each threshold is its own artefact; the endpoint must not silently alias."""
+    seen = {}
+    for threshold in (0, 1, 2):
+        response = client.get("/benchmark", params={"threshold": threshold})
+        if response.status_code == 404:
+            continue
+        body = response.json()
+        assert body["infect_threshold"] == threshold, "served the wrong artefact"
+        seen[threshold] = next(
+            r["p_at_10"] for r in body["results"] if r["method"] == "funnel"
+        )
+    if len(seen) < 2:
+        pytest.skip("threshold sweep not present — see current_status.md §3.1")
+    # A stricter cut has fewer positives, so P@10 must fall.
+    ordered = [seen[k] for k in sorted(seen)]
+    assert ordered == sorted(ordered, reverse=True), f"P@10 should fall as the cut tightens: {seen}"
+
+
+def test_benchmark_missing_threshold_explains_the_full_chain(client):
+    """The 404 must not suggest a bare `make bench` — that would mislabel old data."""
+    response = client.get("/benchmark", params={"threshold": 3})
+    if response.status_code == 200:
+        pytest.skip("benchmark-gt3.json exists")
+    detail = response.json()["detail"]
+    assert "ingest" in detail and "proteins" in detail
+
+
+def test_ui_is_served_and_self_contained(client):
+    """The demo page must load with no external requests (no CDN, no build step)."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    html = response.text
+    assert "PhageForge" in html
+    assert "//cdn" not in html and "https://" not in html.replace(
+        "http://www.w3.org/2000/svg", ""
+    ), "the page must not reference an external host"

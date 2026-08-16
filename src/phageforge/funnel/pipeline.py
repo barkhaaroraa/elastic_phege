@@ -21,6 +21,7 @@ from phageforge.funnel.stages import (
     MODEL_VERSION,
     EmptyStage,
     Prior,
+    Profiles,
     StageResult,
     find_neighbours,
     get_strain,
@@ -83,6 +84,7 @@ def run_funnel(
     use_prior: bool = True,
     weights: dict[str, float] | None = None,
     breadth: dict[str, float] | None = None,
+    profiles: Profiles | None = None,
     explain: bool = True,
     build_cocktail: bool = True,
     persist: bool = True,
@@ -131,7 +133,14 @@ def run_funnel(
         run.stages["A"] = candidates
 
         ranked = stage_d_rank(
-            client, candidates.results, priors, top_n=top_n, weights=weights, breadth=breadth
+            client,
+            candidates.results,
+            priors,
+            top_n=top_n,
+            weights=weights,
+            breadth=breadth,
+            strain=strain,
+            profiles=profiles,
         )
         run.stages["D"] = ranked
         run.shortlist = ranked.results

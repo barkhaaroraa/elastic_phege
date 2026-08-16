@@ -7,6 +7,11 @@ what is still open. Design intent lives in [`docs/`](./docs/); ground truth abou
 the dataset lives in [`docs/DATA_NOTES.md`](./docs/DATA_NOTES.md). **Where this
 file and the architecture doc disagree, this file is what is true.**
 
+**Picking up work?** Read [`docs/REVIEW_BACKLOG.md`](./docs/REVIEW_BACKLOG.md)
+first. It carries the 2026-08-16 domain review, what the benchmark numbers
+actually prove, and the workstream split with a file-collision matrix for
+parallel sessions.
+
 ---
 
 ## 1. Where we are
@@ -79,7 +84,34 @@ Tier-1 foundation and the only data anywhere with **real measured negatives**.
 | `GET /strains` · `/strains/{id}` | Catalogue and type-ahead |
 | `GET /phages` · `/phages/{id}` | Catalogue |
 | `GET /runs` · `/runs/{run_id}` | The audit trail, summary and full |
-| `GET /benchmark` | Last measured benchmark, served from disk not recomputed |
+| `GET /benchmark?threshold=` | A measured benchmark run. `0` / `1` / `2` select the §3.1 sweep artefacts |
+| `GET /` | The demo UI (below) |
+
+### The demo UI
+
+`make api`, then open <http://localhost:8000/>. One self-contained HTML file
+served same-origin — no CDN, no build step, no external request (asserted by a
+test). It is a thin view over the endpoints above; every number on the page comes
+from one of them and nothing is recomputed client-side.
+
+Three panels, matching the three questions someone actually asks:
+
+1. **Pick a strain** — type-ahead over `/strains`, with the strain's receptor
+   profile (ST, phylogroup, O-antigen, H-type, LPS core, defence systems) shown
+   before you run anything, so the reasons afterwards can be checked against it.
+2. **What came back** — the funnel's per-stage latency as a proportional strip
+   (which stage actually costs the time), then the ranked shortlist: score,
+   evidence tier, neighbour support, and the Stage C reason strings on every row.
+   Then the cocktail with its per-phage rationale.
+3. **How good is it** — the benchmark against all three baselines and both
+   ablations, with the base rate drawn as a reference line, and tabs for the
+   three threshold cuts from §3.1. The `− RBP arm` bar sits *above* the funnel
+   bar at two of the three cuts; the chart is not arranged to hide that.
+
+`/#ECOR-54` deep-links straight to a result, so a demo link lands on output
+rather than an empty form. A strain with no genome vector (`LF110`) renders the
+422 stage-N stop as a stated cause rather than an empty list — the designed
+behaviour is visible in the UI, not just in the API contract.
 
 Two behaviours are deliberate and tested:
 
@@ -128,6 +160,48 @@ individually.
 
 > The old §3 hand-picked `ECOR-54` figure of P@10 = 90% is **superseded**. It was
 > one strain in a dense ST73 cluster. The number to quote is **0.633**.
+
+### 3.1 Threshold sensitivity — the sweep
+
+§5.2's open question, run rather than argued. Each row is a **complete
+re-derivation** (`ingest → features → proteins → bench`), not just a relabelled
+rerun. Artefacts: `benchmark.json` (`>0`), `benchmark-gt1.json` (`>1` = ≥2),
+`benchmark-gt2.json` (`>2` = ≥3).
+
+| Cut | Positives | Base rate | Strains | random | generalist | phylo-NN | **funnel** | − prior | − RBP | **× base** | Cocktail |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| `>0` (default) | 7,976 (20.8%) | 21.4% | 390 | 0.204 | 0.581 | 0.585 | **0.633** | 0.535 | 0.633 | **2.96** | 92.1% |
+| `>1` (≥2) | 4,962 (12.9%) | 13.8% | 375 | 0.131 | 0.413 | 0.434 | **0.486** | 0.426 | 0.484 | **3.51** | 85.1% |
+| `>2` (≥3) | 2,656 (6.9%) | 8.3% | 335 | 0.078 | 0.274 | 0.298 | **0.341** | 0.272 | 0.347 | **4.11** | 71.0% |
+
+All figures P@10. Fewer strains are evaluable at stricter cuts because a strain
+with no positive contributes nothing to P@10 or AUPRC.
+
+**What the sweep settles:**
+
+1. **The ordering never changes.** funnel > phylo-NN > generalist > random at
+   every cut. The central claim does not depend on the threshold choice.
+2. **Enrichment over base rate improves monotonically** — 2.96 → 3.51 → 4.11.
+   Absolute P@10 falls (mechanically, there are fewer positives to find), but the
+   funnel gets *relatively better* at surfacing strong lysis. If anything the
+   default `>0` **understates** the system.
+3. **The prior is the engine at every cut.** Removing it costs 9.8 / 6.0 / 6.9
+   pts P@10. At `>2` the ablated funnel (0.272) falls to the generalist baseline
+   (0.274) — without neighbour transfer there is nothing strain-specific left.
+4. **The RBP arm is null at every cut**, and at `>2` it is *negative* (0.347
+   without vs 0.341 with). Three independent thresholds agreeing is much stronger
+   evidence than the single run in §3 reading 3.
+5. **Cocktail coverage degrades as the bar rises** (92% → 85% → 71%), which is
+   the honest reading: guaranteeing *strong* lysis across a strain panel is a
+   materially harder problem than guaranteeing *any* lysis, and a 4-phage
+   cocktail is not sufficient for it.
+
+**Reproducibility note.** For a fixed index the benchmark is bit-identical across
+runs (verified). Across a **re-ingest** it is not: P@10 drifts by up to ~0.2 pts
+on the ablation rows, because re-indexing changes segment layout and the
+approximate HNSW kNN returns slightly different neighbour sets. Two orders of
+magnitude below the effects above, so it changes nothing — but "identical
+numbers" should not be promised across a rebuild, only across a rerun.
 
 ### Earlier validation (still holds)
 
@@ -227,7 +301,7 @@ Running Prokka to reproduce the authors' numbering exactly remains the clean
 fix. Still deferred, still a heavy dependency, and now demonstrably low-value
 (§3, reading 3).
 
-### 5.2 🟠 Infection threshold is still a placeholder — **needs the reviewer**
+### 5.2 🟢 Infection threshold — **swept and measured; the reviewer's call is now low-risk**
 
 The matrix is a graded 0–4 lysis score, not binary and not EOP:
 
@@ -235,12 +309,30 @@ The matrix is a graded 0–4 lysis score, not binary and not EOP:
 |---|--:|--:|--:|--:|--:|--:|
 | Cells | 30,459 | 3,014 | 2,306 | 1,368 | 1,288 | 157 |
 
-Currently binarised at `> 0` (7,976 positives, 20.8%), grounded in the authors'
-own code, which compares `>0` throughout. **This is review question 3 in
-`SOLUTION_OVERVIEW.md` §12.** If the cut belongs at ≥2, positives fall to 4,962
-and **every number in §3 moves.** Configurable via `PF_INFECT_THRESHOLD`, and the
-benchmark records the threshold it ran at in its output — but no one has yet
-re-run the sweep at ≥2. That is a one-command experiment and worth doing.
+Default is `> 0` (7,976 positives, 20.8%), grounded in the authors' own code,
+which compares `>0` throughout. **This is review question 3 in
+`SOLUTION_OVERVIEW.md` §12.** It was flagged as the largest uncertainty under
+every number in §3. It has now been run at all three defensible cuts — see
+[§3.1](#31-threshold-sensitivity--the-sweep). **The conclusions are
+threshold-invariant**: the method ordering is identical at every cut and the
+funnel's enrichment over base rate *improves* as the cut tightens.
+
+The reviewer still chooses which cut to publish. What has changed is that the
+choice no longer threatens the headline claim — it rescales the absolute
+numbers, and the ranking survives.
+
+> ⚠️ **Off-by-one trap.** The code applies `score > PF_INFECT_THRESHOLD`, so the
+> "≥2" cut this section asks about is `PF_INFECT_THRESHOLD=1`, **not** `=2`
+> (which is ≥3). Setting `=2` and labelling it "≥2" silently reports the wrong
+> experiment.
+
+> ⚠️ **A threshold change is not a one-command rerun.** `infects` is computed at
+> *ingest*, and `bulk_index` replaces whole documents — so a re-ingest wipes the
+> `genome_vector` and `rbp_match_vector` fields that `features` and `proteins`
+> attach afterwards. The full chain is
+> `ingest → features → proteins → bench` (~3 min; ESM-2 is served from cache).
+> Running `bench` alone with a different env var produces a file *labelled* with
+> the new threshold while measuring the old data.
 
 ### 5.3 🟠 Stage A still has nothing to do at this scale — **now measured**
 

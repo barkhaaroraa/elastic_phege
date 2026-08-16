@@ -499,8 +499,15 @@ def stage_a_candidates(
             "rank_score": float(h["_score"]),
             "host_range_breadth": h["_source"].get("host_range_breadth"),
             "rbp_confidence": h["_source"].get("rbp_match_confidence"),
-            "rbp_similarity": arm_scores.get("rbp", {}).get(h["_source"]["phage_id"], 0.0),
-            "genome_similarity": arm_scores.get("genome", {}).get(h["_source"]["phage_id"], 0.0),
+            # Absent from an arm means "this arm did not retrieve it", not "it is
+            # maximally dissimilar". ES scores cosine as (1 + cos) / 2, so the
+            # neutral value is 0.5 (orthogonal); 0.0 would mean *anti-similar* and
+            # would penalise an unretrieved candidate below every retrieved one.
+            # Invisible at 96 phages, where the pool exceeds the corpus and every
+            # candidate is returned by every arm -- a silent misranking at the
+            # 100K+ tiers Stage A actually exists for.
+            "rbp_similarity": arm_scores.get("rbp", {}).get(h["_source"]["phage_id"], 0.5),
+            "genome_similarity": arm_scores.get("genome", {}).get(h["_source"]["phage_id"], 0.5),
         }
         for h in hits
     ]
@@ -684,6 +691,140 @@ def _reason(signal: dict) -> str:
     )
 
 
+# ------------------------------------------- receptor & defence compatibility
+
+
+#: Strain attribute -> denormalised interaction field, for the Stage D
+#: compatibility features. Split into two groups because they are averaged
+#: separately: receptor attributes describe what the phage has to *bind*,
+#: defence systems describe what the strain does to it *after* binding.
+RECEPTOR_PROFILE_FIELDS = {
+    "lps_type": "host_lps_type",
+    "o_antigen": "host_o_antigen",
+    "capsule_types": "host_capsule_types",
+}
+DEFENCE_PROFILE_FIELDS = {"defence_systems": "host_defence_systems"}
+PROFILE_FIELDS = {**RECEPTOR_PROFILE_FIELDS, **DEFENCE_PROFILE_FIELDS}
+
+#: Additive-smoothing strength for a per-group infection rate, in units of
+#: observations. A phage tested against three R4 strains that happened to lyse
+#: all three is not evidence that it loves R4; with ``m`` pseudo-observations
+#: pulled toward the phage's own overall rate, a group that small contributes
+#: almost nothing and a group of 200 contributes almost fully. Chosen a priori,
+#: not fitted -- fitting it belongs with the LTR work.
+PROFILE_SMOOTHING = 5.0
+
+
+@dataclass
+class Profiles:
+    """Per-phage infection rates, overall and broken down by host attribute.
+
+    Built by one aggregation over ``pf-interactions``; ``rate[phage][field][value]``
+    is ``(hits, tested)`` among the *visible* strains. The benchmark restricts
+    visibility to its training strains, so this carries the same fold-safety
+    contract as ``breadth`` -- see :func:`phageforge.bench.harness.fold_breadth`.
+    """
+
+    overall: dict[str, float]
+    rates: dict[str, dict[str, dict[str, tuple[int, int]]]]
+
+    def delta(self, phage_id: str, field: str, value: str) -> float | None:
+        """Smoothed infection-rate lift for one attribute value, or None."""
+        base = self.overall.get(phage_id)
+        if base is None:
+            return None
+        group = self.rates.get(phage_id, {}).get(field, {}).get(value)
+        if group is None:
+            return None
+        hits, tested = group
+        smoothed = (hits + PROFILE_SMOOTHING * base) / (tested + PROFILE_SMOOTHING)
+        return smoothed - base
+
+    def _mean_delta(self, phage_id: str, fields: dict[str, str], strain: dict) -> float:
+        deltas: list[float] = []
+        for attribute, indexed_field in fields.items():
+            raw = strain.get(attribute)
+            if raw is None:
+                continue
+            # Multi-valued attributes (capsule_types, defence_systems) contribute
+            # the mean of their own values, so a strain carrying seven defence
+            # systems does not outvote one carrying a single O-antigen.
+            values = raw if isinstance(raw, list) else [raw]
+            per_field = [
+                d for v in values if (d := self.delta(phage_id, indexed_field, v)) is not None
+            ]
+            if per_field:
+                deltas.append(sum(per_field) / len(per_field))
+        return sum(deltas) / len(deltas) if deltas else 0.0
+
+    def features(self, phage_id: str, strain: dict) -> dict[str, float]:
+        """The two Stage D compatibility features for one phage against one strain."""
+        return {
+            "receptor_compat": self._mean_delta(phage_id, RECEPTOR_PROFILE_FIELDS, strain),
+            "defence_compat": self._mean_delta(phage_id, DEFENCE_PROFILE_FIELDS, strain),
+        }
+
+
+def susceptibility_profiles(
+    client: Elasticsearch,
+    *,
+    training: Sequence[str] | None = None,
+    max_values: int = 250,
+) -> Profiles:
+    """How often does each phage infect strains carrying each host attribute?
+
+    One aggregation, entirely in-cluster. This is the fix for the reviewer
+    finding in ``docs/REVIEW_BACKLOG.md`` 3.1: the receptor and defence
+    attributes were indexed and used to *explain* rankings (Stage C) without
+    ever *influencing* them. Two strains can be near-identical phylogenetically
+    and differ at the O-antigen or capsule that the phage actually has to bind,
+    and until now Stage D could not see that difference.
+
+    ``training`` restricts visibility for the benchmark; omit it for live
+    queries, where every measured strain is fair game.
+    """
+    must: list[dict] = [{"term": {"resolution": "strain"}}]
+    if training is not None:
+        must.append({"terms": {"host_id": list(training)}})
+
+    breakdown = {
+        f"by_{field}": {
+            "terms": {"field": field, "size": max_values},
+            "aggs": {"hits": {"filter": {"term": {"infects": True}}}},
+        }
+        for field in PROFILE_FIELDS.values()
+    }
+
+    response = client.search(
+        index=config.INTERACTIONS,
+        size=0,
+        query={"bool": {"filter": must}},
+        aggs={
+            "by_phage": {
+                "terms": {"field": "phage_id", "size": 1000},
+                "aggs": {"hits": {"filter": {"term": {"infects": True}}}, **breakdown},
+            }
+        },
+    )
+
+    overall: dict[str, float] = {}
+    rates: dict[str, dict[str, dict[str, tuple[int, int]]]] = {}
+    for bucket in response["aggregations"]["by_phage"]["buckets"]:
+        phage_id = bucket["key"]
+        tested = bucket["doc_count"]
+        if not tested:
+            continue
+        overall[phage_id] = bucket["hits"]["doc_count"] / tested
+        rates[phage_id] = {
+            field: {
+                sub["key"]: (sub["hits"]["doc_count"], sub["doc_count"])
+                for sub in bucket[f"by_{field}"]["buckets"]
+            }
+            for field in PROFILE_FIELDS.values()
+        }
+    return Profiles(overall=overall, rates=rates)
+
+
 # ----------------------------------------------------------------- D: ranking
 
 
@@ -691,6 +832,14 @@ def _reason(signal: dict) -> str:
 #: the neighbour prior dominates because it is the only feature measured against
 #: real negatives. `phageforge.bench` fits them on strain-grouped folds and
 #: writes the fitted set to data/derived; see MODEL_VERSION below.
+#:
+#: ``rbp_similarity`` and ``genome_similarity`` stay at 0.0 deliberately. They are
+#: now genuinely wired into the score -- they were not, which is why the "- RBP
+#: arm" ablation measured nothing -- so this dict is once again the only thing
+#: deciding whether they count, and picking a number here by hand would be
+#: guessing. Until the fitted set lands, zero keeps the funnel behaving exactly as
+#: it did when the features were unreachable, which is what makes the wiring
+#: change safe to land on its own.
 DEFAULT_WEIGHTS = {
     "prior": 3.0,
     "support": 0.30,
@@ -698,6 +847,17 @@ DEFAULT_WEIGHTS = {
     "breadth": 0.25,
     "rbp_similarity": 0.0,
     "genome_similarity": 0.0,
+    # Receptor compatibility (REVIEW_BACKLOG.md 3.1). Unlike the two above this
+    # one ships switched on, because it was measured before it was promoted:
+    # +0.0136 P@10 against the funnel without it, 95% CI +0.0056..+0.0218,
+    # p = 0.002, winning on 92 strains and losing on 56. The weight itself was
+    # fixed a priori by variance matching (see bench.harness.RECEPTOR_WEIGHTS),
+    # not tuned against that number.
+    "receptor_compat": 3.0,
+    # Defence compatibility stays at 0.0 because it was measured and does
+    # nothing: +0.0008 P@10, CI -0.0056..+0.0072, p = 0.82. The feature is left
+    # wired so the null result stays reproducible rather than becoming folklore.
+    "defence_compat": 0.0,
     "bias": 0.0,
 }
 
@@ -711,7 +871,51 @@ FEATURE_NAMES = (
     "breadth",
     "rbp_similarity",
     "genome_similarity",
+    "receptor_compat",
+    "defence_compat",
 )
+
+#: Features that arrive as an Elasticsearch ``cosine`` score, which ES reports as
+#: ``(1 + cos) / 2``: 1.0 identical, 0.5 orthogonal, 0.0 opposed. They are centred
+#: on 0.5 before scoring so that a weight of zero is genuinely neutral and a
+#: fitted weight reads as "score per unit of cosine above orthogonal" rather than
+#: being confounded with a constant offset already covered by ``bias``.
+_COSINE_FEATURES = frozenset({"rbp_similarity", "genome_similarity"})
+
+
+def _score_script() -> str:
+    """Build the Painless source from :data:`FEATURE_NAMES`.
+
+    Generated rather than hand-written because the two drifting apart is not a
+    hypothetical: ``rbp_similarity`` and ``genome_similarity`` were declared here
+    and in ``DEFAULT_WEIGHTS``, computed by Stage A, and then never referenced by
+    the script -- so the "- RBP arm" ablation measured only Stage A's effect on
+    ``candidate_rank`` and reported, correctly but misleadingly, that the RBP arm
+    changed nothing. Deriving the script from the tuple makes that class of bug
+    unrepresentable.
+
+    The ``containsKey`` guard covers only the transient case of a feature declared
+    in :data:`FEATURE_NAMES` before :func:`stage_d_rank` builds it -- a missing
+    feature then contributes 0 instead of throwing a Painless ``runtime error``
+    that names nothing. That state is still a bug: ``tests/test_stages.py``
+    fails on it. The guard keeps the failure legible rather than fatal at query
+    time.
+    """
+    terms = "".join(
+        f"        s += params.w.{name} * "
+        f"(f.containsKey('{name}') ? ((double) f.{name}) : 0.0);\n"
+        for name in FEATURE_NAMES
+    )
+    return (
+        "\n        String id = doc['phage_id'].value;\n"
+        "        if (!params.f.containsKey(id)) { return 0; }\n"
+        "        Map f = params.f.get(id);\n"
+        "        double s = params.w.bias;\n"
+        f"{terms}"
+        "        // script_score requires a non-negative score.\n"
+        "        return s < 0 ? 0 : s;\n    "
+    )
+
 
 MODEL_VERSION = "phageforge-linear-v1"
 
@@ -724,6 +928,8 @@ def stage_d_rank(
     top_n: int = config.TOP_N,
     weights: dict[str, float] | None = None,
     breadth: dict[str, float] | None = None,
+    strain: dict | None = None,
+    profiles: Profiles | None = None,
 ) -> StageResult:
     """Final ranking: a linear blend evaluated in-cluster by ``script_score``.
 
@@ -742,10 +948,28 @@ def stage_d_rank(
     this: the indexed value is computed over *all* interactions including the
     held-out strain's own row, which is a small but real leak, so each fold
     supplies breadth computed from its training strains only.
+
+    ``strain`` and ``profiles`` drive the receptor/defence compatibility features.
+    ``profiles`` carries the same fold-safety contract as ``breadth`` and is
+    computed once per fold by the benchmark; when it is omitted and the features
+    carry weight, it is built here from every measured strain.
     """
     if not candidates:
         raise EmptyStage("D", "stage A returned no candidates to rank")
     weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+
+    # Only pay for the profile aggregation when something will actually read it.
+    # At weight 0.0 the features are inert, so computing them would be a round
+    # trip spent on a term the script multiplies away.
+    wants_profiles = any(weights.get(name) for name in ("receptor_compat", "defence_compat"))
+    if wants_profiles and profiles is None and strain is not None:
+        profiles = susceptibility_profiles(client)
+    compat = (
+        {c["phage_id"]: profiles.features(c["phage_id"], strain) for c in candidates}
+        if profiles is not None and strain is not None
+        else {}
+    )
+    neutral = {"receptor_compat": 0.0, "defence_compat": 0.0}
 
     prior_by_id = {p.phage_id: p for p in priors}
     n = len(candidates)
@@ -765,23 +989,22 @@ def stage_d_rank(
                 if breadth is not None
                 else float(c.get("host_range_breadth") or 0.0)
             ),
+            # Stage A's per-arm similarities, centred (see _COSINE_FEATURES). When
+            # an arm is switched off for an ablation its centroid is None, Stage A
+            # records the neutral 0.5, and these land at exactly 0.0 -- so the
+            # ablation removes the signal without introducing a constant shift.
+            "rbp_similarity": float(c.get("rbp_similarity", 0.5)) - 0.5,
+            "genome_similarity": float(c.get("genome_similarity", 0.5)) - 0.5,
+            # Already centred on zero by construction: each is a smoothed
+            # infection-rate *lift* over the phage's own overall rate, so a phage
+            # with no measurements against this strain's receptor type scores 0.0
+            # and is neither rewarded nor punished for the absence.
+            **compat.get(c["phage_id"], neutral),
         }
         for i, c in enumerate(candidates)
     }
 
-    script = """
-        String id = doc['phage_id'].value;
-        if (!params.f.containsKey(id)) { return 0; }
-        Map f = params.f.get(id);
-        double breadth = (double) f.breadth;
-        double s = params.w.bias
-            + params.w.prior          * ((double) f.prior)
-            + params.w.support        * ((double) f.support)
-            + params.w.candidate_rank * ((double) f.candidate_rank)
-            + params.w.breadth        * breadth;
-        // script_score requires a non-negative score.
-        return s < 0 ? 0 : s;
-    """
+    script = _score_script()
 
     with _Timer() as t:
         response = client.search(
