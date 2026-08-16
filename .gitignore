@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Data: raw downloads and everything derived from them. Reproducible via `make ingest`.
+data/
+!data/.gitkeep
+
+# Local scratch
+*.log
+.DS_Store
