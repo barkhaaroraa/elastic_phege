@@ -69,11 +69,18 @@ Nothing covers the funnel stages, features, ingest, or the harness.
 | random | 0.204 | 0.098 | 0.246 | — |
 | generalist | 0.581 | 0.379 | 0.594 | — |
 | phylo_nn | 0.585 | 0.385 | 0.590 | — |
-| **funnel** | **0.633** | **0.413** | **0.654** | 73.7 |
-| funnel − rbp | 0.633 | 0.413 | 0.657 | 64.3 |
-| funnel − prior | 0.535 | 0.298 | 0.525 | 65.2 |
+| **funnel** | **0.646** | **0.421** | **0.675** | 71 |
+| funnel − RBP arm | 0.647 | 0.424 | 0.679 | 63 |
+| funnel − receptor compat | 0.633 | 0.413 | 0.655 | 70 |
+| funnel − prior | 0.613 | 0.378 | 0.600 | 72 |
+| funnel + defence compat | 0.647 | 0.423 | 0.670 | 71 |
 
 Funnel cocktail coverage 0.921 · top-4 coverage 0.923 · 0 failures.
+
+**This table postdates WS-1 (§4.1).** The previous published funnel scored 0.633;
+that configuration is now the `− receptor compat` ablation row, which reproduces
+it exactly. Paired significance testing against `funnel`, bootstrap CI and
+Wilcoxon, is in the `significance` block of `benchmark.json`.
 
 ---
 
@@ -81,34 +88,43 @@ Funnel cocktail coverage 0.921 · top-4 coverage 0.923 · 0 failures.
 
 Three readings, all uncomfortable, all supported by the table above.
 
-### 2.1 🔴 We are +4.8 points over a phylogenetic nearest-neighbour lookup
+### 2.1 🟠 We are +6.1 points over a phylogenetic nearest-neighbour lookup
 
-`phylo_nn` — "find the nearest strains by phylogeny, recommend their phages" —
-scores 0.585. The full funnel scores 0.633. Every stage, vector, and aggregation
-buys **4.8 points of P@10** over a baseline that fits in twenty lines.
+**Updated after WS-1.** `phylo_nn` — "find the nearest strains by phylogeny,
+recommend their phages" — scores 0.585. The funnel scores 0.646, so the margin is
+**+6.1 points of P@10** (95% CI +0.041..+0.081, p = 1.5e-09). Against
+`generalist` it is +6.5 points (CI +0.048..+0.083, p = 3.5e-12).
 
-Against `generalist` ("rank phages by how many strains they infect, ignore the
-query entirely") the margin is +5.2 points.
+It was +4.8 before the receptor feature landed. Both margins are now
+statistically solid on paired per-strain tests, but they are still *modest*, and
+that is the number a reviewer or judge will press on. State it plainly rather
+than leading with the enrichment multiple.
 
-This is the number a reviewer or judge will press on. Until §3.1 lands,
-"strain-level and explainable" is a **design claim, not a demonstrated
-advantage**. Do not present the funnel as validated without stating this margin.
+### 2.2 🔴 The RBP arm contributes nothing — and the first measurement of that was invalid
 
-### 2.2 🔴 The RBP arm contributes exactly nothing
+Two separate facts, easy to conflate:
 
-`funnel_minus_rbp` scores **0.6333** vs the full funnel's **0.6331** — the
-ablation is fractionally *better*, and its AUPRC is higher too (0.657 vs 0.654).
-It is also 9 ms faster at p95.
+1. **The original ablation was measuring the wrong thing.** `rbp_similarity` and
+   `genome_similarity` were declared in `DEFAULT_WEIGHTS` and `FEATURE_NAMES`,
+   computed by Stage A, and then *never referenced by the hand-written Painless
+   script*. So "− RBP arm" only ever measured Stage A's knock-on effect on
+   `candidate_rank`. The script is now generated from `FEATURE_NAMES`
+   (`stages.py:_score_script`), which makes that class of bug unrepresentable.
+2. **After the fix, the arm still contributes nothing.** `funnel_minus_rbp` is
+   **+0.0013 P@10** against the funnel, CI −0.0026..+0.0051, p = 0.52 — a clean
+   null on 390 paired strains — while being ~8 ms faster at p95.
 
-All of Phase 3 — the risky ordinal mapping (§5.1 of `current_status.md`), the
-127 ESM-2 embeddings, the confidence tiering — currently buys zero. §5.3
-predicted this ("Stage A has nothing to do at this scale"); it is now measured.
+So the conclusion survived, but only the second measurement supports it. Both
+similarity weights remain 0.0 pending a fit. §5.3 predicted the null ("Stage A
+has nothing to do at this scale"); WS-3 is where it gets its chance.
 
-### 2.3 🟠 The prior is the only thing doing real work
+### 2.3 🟠 The prior is the largest single contributor, but no longer the only one
 
-`funnel_minus_prior` collapses to 0.535 — below both non-random baselines. Stage
-B's neighbour-transfer prior *is* the system. Everything else is decoration on
-top of it, which is consistent with 2.1 and 2.2.
+`funnel_minus_prior` scores 0.613 (−0.034 vs the funnel, p = 3.3e-06). Before the
+receptor feature landed the same ablation collapsed to 0.535, *below* both
+non-random baselines. It now clears `phylo_nn` on its own (+0.027, CI
++0.004..+0.050), which means the funnel no longer rests on a single feature —
+a meaningful robustness improvement, not just a metric bump.
 
 ---
 
@@ -118,7 +134,13 @@ Reviewed by **Barkha Arora** (microbiology). This partially satisfies the
 "reviewed by a domain expert" line in `TECHNICAL_DESIGN.md` §11 and answers
 several of the questions posed in `SOLUTION_OVERVIEW.md` §12.
 
-### 3.1 🔴 CONFIRMED — genetic similarity does not imply capsule similarity
+### 3.1 ✅ CONFIRMED AND ACTED ON — genetic similarity does not imply capsule similarity
+
+> **Outcome (WS-1, 2026-08-16).** The reviewer was right, and acting on it is the
+> largest single quality gain the project has had. Receptor compatibility is now
+> a Stage D scoring feature: **+0.0131 P@10** against the funnel without it, 95%
+> CI +0.0062..+0.0200, p = 7.9e-05, winning on 77 strains and losing on 43. The
+> funnel's margin over `phylo_nn` went from +4.8 to +6.1 points. Details in §4.1.
 
 > *"genetic similarity doesn't mean capsules of bacteria will also be similar;
 > sometimes it is the deciding factor for infections and resistance … it may just
@@ -159,7 +181,15 @@ Corroborating evidence that the signal is real and being wasted: Stage C already
 surfaced `lps_type: R1` as the top signal for phage T4LD at 69% vs 51%
 background — recovering known T4 receptor biology unprompted.
 
-### 3.2 🟠 CONFIRMED with a correction — CRISPR / existing resistance
+### 3.2 ⬜ MEASURED AND NULL — CRISPR / existing resistance
+
+> **Outcome (WS-1, 2026-08-16).** Implemented on the same footing as receptor
+> compatibility and it does **nothing**: `funnel_plus_defence` scores +0.0005
+> P@10 against the funnel, CI −0.0054..+0.0064, p = 0.66. The feature is wired
+> and shipped at weight 0.0 so the null stays reproducible instead of becoming
+> folklore. See §4.1 for why this is a weaker test than it looks — presence of a
+> defence *system* is not the same claim as a CRISPR spacer matching a *specific*
+> phage, which is still unbuilt and still needs the genomes (WS-2).
 
 > *"some bacterial strains will already have resistance to a phage … CRISPR
 > sequences … you'll have to incorporate that so it checks existing resistances."*
@@ -264,33 +294,55 @@ before starting** — two sessions editing `stages.py` at once will conflict.
 
 Priority: 🔴 blocks the central claim · 🟠 significant · 🟡 valuable · ⚪ optional.
 
-### WS-1 🔴 Receptor & defence features in ranking
+### WS-1 ✅ DONE (2026-08-16) — Receptor & defence features in ranking
 
-**The single highest-value item in this document.** Directly addresses §3.1 and
-§3.2, uses data already indexed, and is the cleanest test of §2.1.
+Addressed §3.1 and §3.2. **Receptor compatibility works; defence compatibility
+does not.** Both are shipped and both results are reproducible.
 
-Promote the `EXPLAIN_FIELDS` from explanation to scoring. Two new Stage D
-features:
+**What was built**
 
-- **`receptor_compat`** — fraction of this phage's known host strains sharing the
-  target strain's `lps_type` / `capsule_types` / `o_antigen`. This converts Stage
-  C's `significant_terms` output from prose into signal.
-- **`defence_mismatch`** — whether the target carries defence systems that are
-  *depleted* among this phage's known hosts (covering RM, BREX, CBASS… not only
-  Cas, per §3.2).
+- **Denormalisation.** `host_lps_type`, `host_o_antigen`, `host_capsule_types`
+  and `host_defence_systems` are copied from `pf-bacteria` onto every
+  `pf-interactions` row at ingest. Elasticsearch has no join, and without this
+  the feature costs one lookup per strain per phage instead of one aggregation.
+  `pf-bacteria` remains the source of truth.
+- **`stages.susceptibility_profiles()`** — one aggregation returning, per phage,
+  its overall infection rate and its rate broken down by each host attribute.
+- **`stages.Profiles.features()`** — turns that into two per-(phage, strain)
+  numbers. Each is a *smoothed rate lift*: how much more often this phage infects
+  strains carrying this strain's LPS type / O-antigen / capsule than it infects
+  anything, with additive smoothing (`PROFILE_SMOOTHING = 5.0`) pulling small
+  groups toward no-effect. Zero-centred, so an unmeasured combination scores 0.0
+  and is neither rewarded nor punished.
+- **Fold safety** — `susceptibility_profiles(training=...)` mirrors
+  `fold_breadth` exactly and is computed once per fold, not once per strain.
 
-Both must be computed **fold-safe**: like the existing `breadth` override in
-`stage_d_rank`, they must be derived from training strains only, or the benchmark
-leaks. Read the `breadth` docstring at `stages.py:719` first — the leak it guards
-against is the same one.
+**Weight selection, and why it is not fitted on the test set**
 
-- **Files:** `funnel/stages.py` (`DEFAULT_WEIGHTS`, `FEATURE_NAMES`,
-  `stage_d_rank`), `bench/harness.py` (fold-safe feature computation)
-- **Done when:** benchmark rerun with a new `MODEL_VERSION`, and the result —
-  better *or worse* — is recorded in §1.4 and §2.
-- **Note:** a null result is a real finding. If receptor features do not beat
-  0.633, the reviewer's hypothesis is falsified *in our data*, which is worth
-  reporting rather than burying.
+Weights were set by *variance matching*: measured over 12 strains, the
+per-candidate spread is prior 0.181, receptor 0.046, defence 0.019. At the
+shipped weights the prior contributes a score spread of 0.543, so weights of 3.0
+(receptor) and 7.0 (defence) give each ~25% of the prior's influence. **That 25%
+is the design decision** — an a priori statement about how much to trust receptor
+compatibility relative to measured neighbours, not a number read off P@10.
+
+**Results** (paired per-strain, vs `funnel`)
+
+| Change | ΔP@10 | 95% CI | p | W/L/T |
+|---|--:|---|--:|---|
+| remove receptor compat | −0.0131 | −0.0200..−0.0062 | 7.9e-05 | 43/77/270 |
+| add defence compat | +0.0005 | −0.0054..+0.0064 | 0.66 | 51/52/287 |
+
+**Two caveats to carry forward**
+
+1. *Including* receptor and *excluding* defence was a decision informed by this
+   benchmark, even though the weights were not. Confirm on a second organism
+   (WS-7) before treating the include/exclude split as settled.
+2. The defence null is a weaker test than it appears. It asks "does carrying
+   system X correlate with resistance to phage P" — **not** "does this strain
+   hold a CRISPR spacer matching this phage's genome", which is the mechanistic
+   claim and needs WS-2. Do not report §3.2 as refuted; report it as untested at
+   the level that matters.
 
 ### WS-2 🟠 CRISPR spacer resistance
 
@@ -452,19 +504,17 @@ artifact regardless.
 
 ## 6. Suggested order
 
-1. **WS-1** (hours) — the one experiment that could change the project's central
-   claim. Everything in §2 argues for doing this before anything else is built on
-   top of Stage D.
-2. **Settle §5.1** with the reviewer, rerun, record.
-3. **WS-3** — the remaining route to justifying Stage A and the Elastic Cloud
-   move.
-4. Then WS-4 / WS-7 / WS-6 in parallel as capacity allows.
+~~1. WS-1~~ — **done**, §4.1. Stage D's feature vector is now stable, so the
+freeze below is lifted: WS-4/5/6/9 may build on it.
+
+1. **WS-7 (Klebsiella)** — promoted. It is now the check on WS-1's one soft spot:
+   whether receptor-over-defence generalises past Gaborieau's matrix.
+2. **WS-3** — the remaining route to justifying Stage A and the Elastic Cloud
+   move, and the only thing that can still rescue the RBP arm (§2.2).
+3. **WS-2** — makes §3.2 a real test rather than a proxy one.
+4. Then WS-4 / WS-6 in parallel as capacity allows.
 
 WS-8 is unblocked at any time and is the right pick-up for a spare session.
-
-**Do not build WS-4, WS-5, WS-6 or WS-9 on top of the current Stage D** — WS-1
-changes its feature vector, and anything trained or presented against the present
-0.633 will need redoing.
 
 ## 7. Second-pass review — corrections to this document
 

@@ -917,7 +917,11 @@ def _score_script() -> str:
     )
 
 
-MODEL_VERSION = "phageforge-linear-v1"
+#: v2 adds receptor compatibility at a non-zero weight (REVIEW_BACKLOG.md 3.1),
+#: which changes the ranking a given strain gets. Bumped rather than edited in
+#: place so that runs already persisted in pf-predictions stay attributable to
+#: the model that actually produced them.
+MODEL_VERSION = "phageforge-linear-v2"
 
 
 def stage_d_rank(
